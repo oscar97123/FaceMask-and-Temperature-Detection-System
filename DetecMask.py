@@ -11,11 +11,21 @@ import os
 import serial
 import time 
 from linenotify import linenotify
-
+import subprocess
 #Setting up your arduino
 arduino = serial.Serial('/dev/cu.usbmodem14501',9600)
 
+playerProcess= None
 lowConfidence = 0.75
+
+isEND = False
+
+def cal_time(start_time, end_time):
+    elapsed_time = end_time - start_time
+    elapsed_hrs = int(elapsed_time / 60 / 60)
+    elapsed_mins = int((elapsed_time - (elapsed_hrs * 60 * 60)) / 60)
+    elapsed_secs = float(elapsed_time - (elapsed_hrs * 60 * 60) - (elapsed_mins * 60))
+    return elapsed_hrs, elapsed_mins, elapsed_secs
 
 #face detectinon function
 def detectAndPredictMask(frame, faceNet, maskNet):
@@ -77,9 +87,16 @@ maskNet = load_model("mask_detector.model")
 
 # initialize the video stream
 vs = VideoStream(src=0).start()
-
+lastime = time.time()
 # loop over the frames from the video stream
+data = False
+tempLimit = 37.5
+
 while True:
+	_, _, elapsed_secs = cal_time(lastime, time.time())
+	if not isEND and elapsed_secs > 1.0:
+		isEND = False
+
 	# grab the frame from the threaded video stream and resize it to have a maximum width of 900 pixels
 	frame = vs.read()
 	frame = imutils.resize(frame, width=900)
@@ -95,18 +112,17 @@ while True:
 
 		# determine the class label and color we'll use to draw the bounding box and text
 		label = "Mask" if mask > withoutMask else "No Mask"
-		color = (0, 255, 0) if label == "Mask" else (0, 0, 255)
-		
-		data = False
+		color = (0, 255, 0) if label == "Mask"  else (0, 0, 255) 
+	
 		while arduino.in_waiting:          # 若收到序列資料…
 			data_raw = arduino.readline()  # 讀取一行
 			data = data_raw.decode()   # 用預設的UTF-8解碼
 			print('接收到的資料：', data)
 
-
 		text = "{}: {:.2f}%".format(label, max(mask, withoutMask) * 100)
 		if data :
-			text = "{}: {:.2f}%, Temparature: {}*C".format(label, max(mask, withoutMask) * 100, data)
+			color = (0, 0, 255)  if float(data) > tempLimit else color
+			text = "{}: {:.2f}%, Temp: {}*C".format(label, max(mask, withoutMask) * 100, data)
 	
 		# display the label and bounding box rectangle on the output frame
 		cv2.putText(frame, text, (startX, startY - 10),
@@ -117,27 +133,35 @@ while True:
 		if not data:
 			continue
 
-		tempLimit= 30
 		if label =="Mask" and float(data) <= tempLimit: # normal
+		# if label =="Mask": # normal
 			print("ACCESS GRANTED")
 
 		else:
 			print("ACCESS DENIED")
 			msg = ""
 			# abnormal	
+			
+
+			can_play_music = True if(playerProcess == None or playerProcess.poll() == 0) else False
 			if label =="Mask" and float(data) > tempLimit:
 				msg = f"溫度過高 Temparature: {data}"
+				if can_play_music:
+					playerProcess = subprocess.Popen(args="afplay ./temputure_too_high.mp3",shell=True)
+
 			elif label !="Mask" and float(data) <= tempLimit:
 				msg = f"沒有正確配戴口罩"
-				os.system("afplay " + "./please_wear_mask.mp3")
+				if can_play_music:
+					playerProcess =subprocess.Popen(args="afplay ./please_wear_mask.mp3",shell=True)
 			elif label !="Mask" and float(data) > tempLimit:
 				msg = f"沒有正確配戴口罩 溫度過高 Temparature: {data}"
-				os.system("afplay " + "./please_wear_mask.mp3")
+				if can_play_music:
+					playerProcess = subprocess.Popen(args="afplay ./please_wear_mask__temputure_too_high.mp3",shell=True)
 			cv2.imwrite('frame.jpg',frame)
-			linenotify(msg=msg, file=open('frame.jpg','rb'))
-				# arduino.write(b'H')
-			# arduino.write(b'L')
-		# include the probability in the label
+			if not isEND:
+				linenotify(msg=msg, file=open('frame.jpg','rb'))
+				isEND = True
+				lastime = time.time()
 
 	# show the output frame
 	cv2.imshow("FaceMask Detection -- q to quit", frame)
